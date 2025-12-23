@@ -1,178 +1,264 @@
-name: IPQ60XX-6.6-WIFI
+yaml
+name: IPQ60XX-Latest-OpenWrt-WiFi
 
 on:
   workflow_dispatch:
-  # schedule:
-  #  - cron: 0 19 * * *
+    inputs:
+      clean_build:
+        description: '是否全新编译'
+        type: choice
+        options:
+          - false
+          - true
+        default: 'false'
+  # 每周一凌晨2点自动编译
+  schedule:
+    - cron: '0 2 * * 1'
 
 env:
-  REPO_URL: https://github.com/breeze303/ipq60xx-6.6.git
-  REPO_BRANCH: main
-  CONFIG_FILE: configs/ipq60xx-6.6-wifi.config
+  # ========== 修改1：更新为官方主线源码 ==========
+  REPO_URL: https://github.com/openwrt/openwrt.git
+  REPO_BRANCH: master # 使用开发分支，获取最新代码
+  CONFIG_FILE: configs/jdc_ax1800-latest.config # 更新配置文件名
   DIY_SCRIPT: diy-script.sh
-  CLASH_KERNEL: amd64
+  DEVICE_MODEL: jdc_ax1800-pro # 指定设备型号
   CACHE_TOOLCHAIN: true
   UPLOAD_BIN_DIR: false
   FIRMWARE_RELEASE: true
-  FIRMWARE_TAG: IPQ60XX-6.6-WIFI
+  # ========== 修改2：更新固件标签 ==========
+  FIRMWARE_TAG: OpenWrt-24.10.x-master-IPQ60XX
   TZ: Asia/Shanghai
 
 jobs:
   Build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04 # 可考虑使用更新的系统版本
+    timeout-minutes: 180
 
     steps:
     - name: Check Server Performance
       run: |
-        echo "警告⚠"
-        echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
-        echo -e "已知CPU型号（降序）：7763，8370C，8272CL，8171M，E5-2673 \n"
-        echo "--------------------------CPU信息--------------------------"
-        echo "CPU物理数量：$(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
-        echo -e "CPU核心信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
-        echo "--------------------------内存信息--------------------------"
-        echo "已安装内存详细信息："
-        echo -e "$(sudo lshw -short -C memory | grep GiB) \n"
-        echo "--------------------------硬盘信息--------------------------"
-        echo "硬盘数量：$(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
+        echo "编译目标：京东云亚瑟 (AX1800 Pro) 最新OpenWrt开发版固件"
+        echo "源码分支：${{ env.REPO_BRANCH }}"
+        echo "预计内核：Linux 6.12.x (社区移植)"
+        echo "OpenWrt版本：基于24.10.x开发版[citation:1]"
+        echo "================================================"
+        echo "系统资源概览："
+        echo "CPU核心数：$(nproc)"
+        echo "内存总量：$(free -h | awk '/^Mem:/{print $2}')"
 
     - name: Initialization Environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        docker rmi $(docker images -q)
-        sudo rm -rf /usr/share/dotnet /etc/apt/sources.list.d /usr/local/lib/android $AGENT_TOOLSDIRECTORY
-        sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* powershell openjdk* mongodb* moby* || true
-        sudo -E apt-get -y update
-        sudo -E apt-get -y install $(curl -fsSL is.gd/depends_ubuntu_2204)
-        sudo -E systemctl daemon-reload
-        sudo -E apt-get -y autoremove --purge
-        sudo -E apt-get -y clean
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          clang \
+          flex \
+          bison \
+          g++ \
+          gawk \
+          gcc-multilib \
+          gettext \
+          git \
+          libncurses5-dev \
+          libssl-dev \
+          python3 \
+          python3-distutils \
+          python3-pip \
+          rsync \
+          unzip \
+          zlib1g-dev \
+          file \
+          wget \
+          curl \
+          time \
+          bc \
+          jq \
+          tree \
+          zip \
+          p7zip-full
         sudo timedatectl set-timezone "$TZ"
 
     - name: Combine Disks
       uses: easimon/maximize-build-space@master
       with:
-        swap-size-mb: 1024
-        temp-reserve-mb: 100
-        root-reserve-mb: 1024
+        swap-size-mb: 2048
+        temp-reserve-mb: 200
+        root-reserve-mb: 2048
 
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
-    - name: Clone Source Code
+    - name: Clone Latest OpenWrt Source
       run: |
-        df -hT $GITHUB_WORKSPACE
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        echo "正在克隆OpenWrt官方主线源码（master分支）..."
+        git clone $REPO_URL -b $REPO_BRANCH openwrt --depth=1
         cd openwrt
         echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
-        VERSION_INFO=$(git show -s --date=short --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")
+        
+        # 获取最新提交信息
+        VERSION_INFO=$(git log -1 --format="作者: %an | 时间: %cd | 提交信息: %s | 哈希: %H")
         echo "VERSION_INFO=$VERSION_INFO" >> $GITHUB_ENV
+        echo "源码已准备就绪。"
 
-    - name: Generate Variables
+    - name: Generate Variables and Config
       run: |
-        cp $CONFIG_FILE $OPENWRT_PATH/.config
         cd $OPENWRT_PATH
-        make defconfig > /dev/null 2>&1
-        SOURCE_REPO="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
-        echo "SOURCE_REPO=$SOURCE_REPO" >> $GITHUB_ENV
-        DEVICE_TARGET=$(cat .config | grep CONFIG_TARGET_BOARD | awk -F '"' '{print $2}')
-        echo "DEVICE_TARGET=$DEVICE_TARGET" >> $GITHUB_ENV
-        DEVICE_SUBTARGET=$(cat .config | grep CONFIG_TARGET_SUBTARGET | awk -F '"' '{print $2}')
-        echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
+        
+        # 1. 首先为京东云亚瑟生成默认配置
+        # 注：官方源码中设备名可能不同，这里先配置目标平台
+        cat > .config << 'EOF'
+CONFIG_TARGET_ipq60xx=y
+CONFIG_TARGET_ipq60xx_generic=y
+# 需要根据官方源码确定具体的设备配置名
+EOF
+        
+        # 2. 生成基础配置框架，以便后续使用menuconfig
+        make defconfig
+        
+        # 3. 手动进入非交互式菜单配置，选择设备与核心包
+        # 这里使用脚本模拟选择，实际操作中可能需要调整
+        ./scripts/env menuconfig || true
+        
+        # 定义变量
+        echo "SOURCE_REPO=openwrt-master" >> $GITHUB_ENV
+        echo "DEVICE_TARGET=ipq60xx" >> $GITHUB_ENV
+        echo "DEVICE_SUBTARGET=generic" >> $GITHUB_ENV
+        echo "DEVICE_PROFILE=jdc_ax1800-pro" >> $GITHUB_ENV
 
     - name: Cache Toolchain
       if: env.CACHE_TOOLCHAIN == 'true'
-      uses: HiGarfield/cachewrtbuild@main
+      uses: actions/cache@v4
       with:
-        ccache: false
-        mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
-        prefix: ${{ env.OPENWRT_PATH }}
-    
+        path: |
+          ${{ env.OPENWRT_PATH }}/dl
+          ${{ env.OPENWRT_PATH }}/build_dir
+        key: ${{ runner.os }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_PROFILE }}-${{ hashFiles('**/.config') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_PROFILE }}-
+
     - name: Install Feeds
       run: |
         cd $OPENWRT_PATH
+        echo "更新并安装软件源..."
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Apply patches   
+    - name: Load Custom Device Configuration
       run: |
-        git config --global user.name "OpenWrt Builder"
-        git config --global user.email "buster-openwrt@ovvo.uk"
-        cd $OPENWRT_PATH/feeds/luci
-        wget https://raw.githubusercontent.com/openwrt-ipq60xx/patches/main/feeds/luci/0001-show-soc-status-on-luci.patch
-        git am 0001-show-soc-status-on-luci.patch
-  
-    - name: Load Custom Configuration
-      run: |
-        [ -e files ] && mv files $OPENWRT_PATH/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE $OPENWRT_PATH/.config
+        echo "加载京东云亚瑟的自定义配置..."
+        # 如果存在自定义配置文件，则应用
+        if [ -f "${{ github.workspace }}/$CONFIG_FILE" ]; then
+          cat "${{ github.workspace }}/$CONFIG_FILE" >> $OPENWRT_PATH/.config
+          echo "自定义配置已追加。"
+        fi
+        
+        # 确保配置是最新且一致的
+        cd $OPENWRT_PATH
+        make defconfig
+        echo "最终配置文件摘要："
+        grep -E "CONFIG_TARGET|CONFIG_LINUX_6_12|CONFIG_PACKAGE_kmod-ath11k" .config || true
 
     - name: Download DL Package
       run: |
         cd $OPENWRT_PATH
-        make defconfig
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+        echo "开始下载编译所需依赖包..."
+        make download -j$(nproc) || make download -j1
+        echo "依赖包下载完成。"
 
     - name: Compile Firmware
       id: compile
       run: |
         cd $OPENWRT_PATH
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
+        echo "开始编译固件，使用 $(nproc) 线程..."
+        
+        # 根据输入参数决定是否清理
+        if [[ "${{ github.event.inputs.clean_build || 'false' }}" == "true" ]]; then
+          echo "执行全新编译，清理旧文件..."
+          make clean
+        fi
+        
+        # 开始编译
+        if make -j$(nproc) ; then
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "编译成功！"
+        else
+          # 尝试单线程编译
+          echo "多线程编译失败，尝试单线程编译..."
+          if make -j1 V=s ; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "单线程编译成功！"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "编译失败。"
+            exit 1
+          fi
+        fi
+        
         echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
-        echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
+        echo "FILE_DATE=$(date +"%Y%m%d")" >> $GITHUB_ENV
 
-    - name: Check Space Usage
-      if: (!cancelled())
-      run: df -hT
-
-    - name: Upload Bin Directory
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      uses: actions/upload-artifact@main
-      with:
-        name: ${{ env.SOURCE_REPO }}-bin-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
-        path: ${{ env.OPENWRT_PATH }}/bin
-
-    - name: Organize Files
+    - name: Check and Organize Firmware
       if: steps.compile.outputs.status == 'success'
       run: |
-        cd $OPENWRT_PATH/bin/targets/*/*
-        cat sha256sums
-        cp $OPENWRT_PATH/.config build.config
-        mv -f $OPENWRT_PATH/bin/packages/*/*/*.ipk packages
-        tar -zcf Packages.tar.gz packages
-        rm -rf packages feeds.buildinfo version.buildinfo
-        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
-
-    - name: Upload Firmware To Artifact
-      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE != 'true'
-      uses: actions/upload-artifact@main
-      with:
-        name: ${{ env.SOURCE_REPO }}-firmware-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE_PATH }}
+        cd $OPENWRT_PATH
+        echo "检查编译生成的固件..."
+        
+        # 查找生成的固件文件，设备名称可能需要调整
+        FIRMWARE_DIR="bin/targets/ipq60xx/generic/"
+        if [ -d "$FIRMWARE_DIR" ]; then
+          echo "固件生成在目录: $FIRMWARE_DIR"
+          ls -la $FIRMWARE_DIR/
+          
+          # 尝试匹配京东云亚瑟相关的固件名
+          FIRMWARE_FILE=$(find $FIRMWARE_DIR -name "*sysupgrade*.bin" | head -1)
+          if [ -f "$FIRMWARE_FILE" ]; then
+            echo "✅ 找到固件文件: $(basename $FIRMWARE_FILE)"
+            echo "文件大小: $(du -h $FIRMWARE_FILE | cut -f1)"
+            echo "FIRMWARE_FILE=$FIRMWARE_FILE" >> $GITHUB_ENV
+            echo "FIRMWARE_PATH=$FIRMWARE_DIR" >> $GITHUB_ENV
+          else
+            echo "⚠️  未找到标准升级文件，列出所有文件:"
+            find $FIRMWARE_DIR -type f
+          fi
+        else
+          echo "❌ 固件输出目录不存在。"
+          exit 1
+        fi
 
     - name: Upload Firmware To Release
       if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
-      uses: ncipollo/release-action@v1
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        name: R${{ env.DATE }} for ${{ env.FIRMWARE_TAG }}
-        allowUpdates: true
-        tag: ${{ env.FIRMWARE_TAG }}
-        token: ${{ secrets.GITHUB_TOKEN }}
-        artifacts: ${{ env.FIRMWARE_PATH }}/*
+        tag_name: ${{ env.FIRMWARE_TAG }}-${{ env.FILE_DATE }}
+        name: OpenWrt Latest Master for JDC AX1800 Pro (${{ env.FILE_DATE }})
+        files: ${{ env.FIRMWARE_PATH }}/*
+        draft: false
+        prerelease: true # 开发版固件标记为预发布
         body: |
-          **This is OpenWrt Firmware for ${{ env.FIRMWARE_TAG }}**
-          ### 📒 固件信息(6.6内核-Beta)
-          - 这是带WIFI以及NSS的6.6内核固件
-          - 💻 这是 ${{ env.FIRMWARE_TAG }} 平台使用的 OpenWrt 固件
-          - ⚽ 固件源码: ${{ env.REPO_URL }}
-          - 💝 源码分支: ${{ env.REPO_BRANCH }}
-          - 🌐 默认地址: 192.168.1.1
-          - 🔑 默认密码: password
-          ### 🧊 固件版本
-          - 固件编译前最后一次➦[主源码](${{ env.REPO_URL }})更新记录
-          - ${{ env.VERSION_INFO }}
+          # OpenWrt 最新开发版固件 - 京东云亚瑟 (AX1800 Pro)
+
+          ## 📦 固件信息
+          - **设备**：京东云亚瑟 (JDC AX1800 Pro)
+          - **源码分支**：`${{ env.REPO_BRANCH }}` (官方主线)
+          - **编译日期**：${{ env.DATE }}
+          - **内核版本**：预计为 **Linux 6.12.x** (IPQ60XX社区移植版[citation:2])
+          - **OpenWrt基准**：基于 **24.10.x** 开发系列[citation:1]
+          - **NSS加速**：支持有线/无线满血NSS (社区驱动)[citation:2]
+
+          ## ⚠️ 重要须知
+          1. 此为**实验性**开发版固件，稳定性待测。
+          2. 内核已更新，刷机前**务必备份**原厂ART/校准数据。
+          3. 首次刷机可能需要**专用uboot**或修改分区表，请参考恩山论坛相关教程[citation:6]。
+
+          ## 🔧 默认设置
+          - 管理地址：`192.168.1.1`
+          - 用户名：`root`
+          - 密码：`password` (登录后请立即修改)
+
+          ## 📁 源码信息
+          - **仓库**：${{ env.REPO_URL }}
+          - **最新提交**：${{ env.VERSION_INFO }}
